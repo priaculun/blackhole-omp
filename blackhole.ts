@@ -245,17 +245,26 @@ function renderObservations(ledger: Ledger): string {
 function renderMemoryBlock(ledger: Ledger): string {
   const active = ledger.observations.filter((o) => !ledger.droppedIds.includes(o.id));
   const parts: string[] = [];
+  const MAX_OBSERVATIONS = 20; // Prevent memory block from becoming too large
+  const MAX_REFLECTIONS = 5;
+
   if (ledger.reflections.length > 0) {
     parts.push("<reflections>");
-    for (const r of ledger.reflections) {
-      parts.push(`- ${r.content}`);
+    for (const r of ledger.reflections.slice(-MAX_REFLECTIONS)) {
+      parts.push(`- ${r.content.slice(0, 200)}`);
+    }
+    if (ledger.reflections.length > MAX_REFLECTIONS) {
+      parts.push(`- … and ${ledger.reflections.length - MAX_REFLECTIONS} more reflections`);
     }
     parts.push("</reflections>");
   }
   if (active.length > 0) {
     parts.push("<observations>");
-    for (const o of active) {
-      parts.push(`- [${o.ts}] ${o.content}`);
+    for (const o of active.slice(-MAX_OBSERVATIONS)) {
+      parts.push(`- [${o.ts}] ${o.content.slice(0, 150)}`);
+    }
+    if (active.length > MAX_OBSERVATIONS) {
+      parts.push(`- … and ${active.length - MAX_OBSERVATIONS} more observations`);
     }
     parts.push("</observations>");
   }
@@ -318,33 +327,46 @@ function extractCompactionContext(
 
 function buildStructuralSummary(ctx: CompactionContext, ledger: Ledger): string {
   const lines: string[] = [];
+  const MAX_ITEMS = 15; // Prevent summary from becoming too large
+
   lines.push("[Session Goal]");
   lines.push(`- ${ctx.goal || "(no explicit goal detected)"}`);
   lines.push("");
 
   if (ctx.filesModified.size > 0) {
     lines.push("[Files And Changes]");
-    for (const f of ctx.filesModified) lines.push(`- Modified: ${f}`);
+    let count = 0;
+    for (const f of ctx.filesModified) {
+      if (count++ >= MAX_ITEMS) { lines.push(`- … and ${ctx.filesModified.size - MAX_ITEMS} more`); break; }
+      lines.push(`- Modified: ${f}`);
+    }
     lines.push("");
   }
   if (ctx.filesRead.size > 0) {
     lines.push("[Files Read]");
-    for (const f of ctx.filesRead) lines.push(`- Read: ${f}`);
+    let count = 0;
+    for (const f of ctx.filesRead) {
+      if (count++ >= MAX_ITEMS) { lines.push(`- … and ${ctx.filesRead.size - MAX_ITEMS} more`); break; }
+      lines.push(`- Read: ${f}`);
+    }
     lines.push("");
   }
   if (ctx.commits.length > 0) {
     lines.push("[Commits]");
-    for (const c of ctx.commits) lines.push(`- ${c}`);
+    for (const c of ctx.commits.slice(0, MAX_ITEMS)) lines.push(`- ${c}`);
+    if (ctx.commits.length > MAX_ITEMS) lines.push(`- … and ${ctx.commits.length - MAX_ITEMS} more`);
     lines.push("");
   }
   if (ctx.blockers.length > 0) {
     lines.push("[Outstanding Context]");
-    for (const b of ctx.blockers) lines.push(`- ${b}`);
+    for (const b of ctx.blockers.slice(0, MAX_ITEMS)) lines.push(`- ${b}`);
+    if (ctx.blockers.length > MAX_ITEMS) lines.push(`- … and ${ctx.blockers.length - MAX_ITEMS} more`);
     lines.push("");
   }
   if (ctx.preferences.length > 0) {
     lines.push("[User Preferences]");
-    for (const p of ctx.preferences) lines.push(`- ${p}`);
+    for (const p of ctx.preferences.slice(0, MAX_ITEMS)) lines.push(`- ${p}`);
+    if (ctx.preferences.length > MAX_ITEMS) lines.push(`- … and ${ctx.preferences.length - MAX_ITEMS} more`);
     lines.push("");
   }
 
@@ -458,7 +480,8 @@ export default function blackhole(pi: ExtensionAPI): void {
     const summary = buildStructuralSummary(compactCtx, ledger);
 
     // Run the native compaction with our summary as custom instructions
-    await ctx.compact({
+    // Wrap in timeout to prevent 30s handler timeout from omp
+    const compactPromise = ctx.compact({
       customInstructions: summary,
       preserveData: {
         blackhole: {
@@ -469,6 +492,23 @@ export default function blackhole(pi: ExtensionAPI): void {
         },
       },
     });
+
+    // 25s timeout — omp handler limit is 30s, leave margin for cleanup
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error("blackhole: compact timed out after 25s")), 25_000);
+    });
+
+    try {
+      await Promise.race([compactPromise, timeoutPromise]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log(cfg.debug, `compaction failed: ${msg}`);
+      if (ctx.hasUI) {
+        ctx.ui.notify(`blackhole: compaction failed — ${msg}`, "warn");
+      }
+      // Don't rethrow — let the session continue
+      return;
+    }
 
     ledger.lastObservedTokenCount = tokens;
     saveLedger(ledger);
@@ -917,6 +957,8 @@ export default function blackhole(pi: ExtensionAPI): void {
       compactionInProgress = true;
       try {
         await runBlackholeCompact(ctx, trigger);
+      } catch (err) {
+        log(cfg.debug, `agent_end compaction error: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         compactionInProgress = false;
       }
@@ -924,7 +966,11 @@ export default function blackhole(pi: ExtensionAPI): void {
     }
 
     if (!memoryEnabled) return;
-    await runReflector(ctx);
+    try {
+      await runReflector(ctx);
+    } catch (err) {
+      log(cfg.debug, `reflector error: ${err instanceof Error ? err.message : String(err)}`);
+    }
   });
 
   log(cfg.debug, "blackhole extension loaded");
