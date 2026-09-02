@@ -50,6 +50,7 @@ Edit `~/.omp/agent/blackhole-config.json`:
 | `observeAfterTokens` | `8000` | Token delta before Observer runs |
 | `observationsPoolMaxTokens` | `4000` | Max active observation pool before Dropper prunes |
 | `debug` | `false` | Log debug info to stderr |
+| `deferCompactionToAgentEnd` | `true` | `true` = wait for agent_end before compacting; `false` = compact immediately at threshold (may interrupt agent) |
 
 ## Commands
 
@@ -71,6 +72,11 @@ Edit `~/.omp/agent/blackhole-config.json`:
 The extension registers a `blackhole_recall` tool the LLM can call to search session history and memory.
 
 ## How it works
+
+### Compaction Deferral
+By default (`deferCompactionToAgentEnd: true`), auto-compaction waits until the agent finishes its current work cycle (`agent_end`) before compacting. This prevents interrupting the agent mid-task.
+
+Set `deferCompactionToAgentEnd: false` to compact immediately at token threshold — matches legacy pi-blackhole behavior but may cut off in-progress agent work.
 
 ### Compaction
 1. `/blackhole` or auto-trigger fires.

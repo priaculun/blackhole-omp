@@ -36,6 +36,7 @@ interface BlackholeConfig {
   compactionSummaryMode: "replace" | "append";
   exportPath: string;
   debug: boolean;
+  deferCompactionToAgentEnd: boolean;
 }
 
 interface Observation {
@@ -111,6 +112,9 @@ const DEFAULT_CONFIG: BlackholeConfig = {
   compactionSummaryMode: "replace",
   exportPath: "blackhole-export.md",
   debug: false,
+  // When true, auto-compaction waits for agent_end instead of interrupting mid-turn.
+  // Set false for immediate compaction at threshold (legacy pi-blackhole behavior).
+  deferCompactionToAgentEnd: true,
 };
 
 // ---------------------------------------------------------------------------
@@ -366,6 +370,7 @@ export default function blackhole(pi: ExtensionAPI): void {
   let turnCount = 0;
   let lastObservedAtTokenCount = 0;
   let compactionInProgress = false;
+  let pendingCompactTrigger: "manual" | "auto" | null = null;
   let memoryEnabled = cfg.memory;
   let compactionMode = cfg.compaction;
 
@@ -401,17 +406,23 @@ export default function blackhole(pi: ExtensionAPI): void {
     const usage = ctx.getContextUsage();
     const tokens = usage?.tokens ?? 0;
 
-    // Auto-compaction check
+    // Defer compaction to agent_end when agent is still working (or when configured)
     if (compactionMode === "auto" && !compactionInProgress && tokens >= cfg.compactAfterTokens) {
-      compactionInProgress = true;
-      try {
-        await runBlackholeCompact(ctx, "auto");
-      } finally {
-        compactionInProgress = false;
+      const shouldDefer = cfg.deferCompactionToAgentEnd || ctx.isIdle?.() === false;
+      if (shouldDefer) {
+        pendingCompactTrigger = "auto";
+        log(cfg.debug, `deferring auto-compact to agent_end tokens=${tokens}`);
+      } else {
+        compactionInProgress = true;
+        try {
+          await runBlackholeCompact(ctx, "auto");
+        } finally {
+          compactionInProgress = false;
+        }
       }
     }
 
-    // Observer check
+    // Observer check — safe at turn_end, only extracts, no mutation
     if (memoryEnabled && tokens - lastObservedAtTokenCount >= cfg.observeAfterTokens) {
       await runObserver(ctx, tokens);
     }
@@ -897,7 +908,22 @@ export default function blackhole(pi: ExtensionAPI): void {
   // -------------------------------------------------------------------------
 
   pi.on("agent_end", async (_event, ctx) => {
-    if (!ledger || !memoryEnabled) return;
+    if (!ledger) return;
+
+    // Run pending compaction first (deferred from turn_end)
+    if (pendingCompactTrigger) {
+      const trigger = pendingCompactTrigger;
+      pendingCompactTrigger = null;
+      compactionInProgress = true;
+      try {
+        await runBlackholeCompact(ctx, trigger);
+      } finally {
+        compactionInProgress = false;
+      }
+      return; // Skip reflector this cycle — compaction already handled
+    }
+
+    if (!memoryEnabled) return;
     await runReflector(ctx);
   });
 
