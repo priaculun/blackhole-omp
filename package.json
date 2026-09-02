@@ -1,0 +1,22 @@
+{
+  "name": "blackhole-omp",
+  "version": "0.1.0",
+  "description": "Deterministic compaction + observational memory extension for Oh My Pi",
+  "main": "blackhole.ts",
+  "scripts": {
+    "test": "bun test"
+  },
+  "keywords": [
+    "omp",
+    "oh-my-pi",
+    "extension",
+    "compaction",
+    "memory",
+    "blackhole"
+  ],
+  "author": "",
+  "license": "MIT",
+  "omp": {
+    "extensions": ["./blackhole.ts"]
+  }
+}
